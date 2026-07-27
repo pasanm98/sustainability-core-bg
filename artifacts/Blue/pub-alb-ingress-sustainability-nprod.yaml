@@ -1,0 +1,21 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    kubernetes.io/ingress.class: qcloud
+    ingress.cloud.tencent.com/auto-rewrite: "true"
+  name: pub-alb-ingress-sustainability-nprod
+  namespace: alb-nprod
+spec:
+  tls:
+  - secretName: sustainability-nprod-cert-secret
+  rules:
+  - http:
+      paths:
+      - backend:
+          service:
+            name: nginx-svc
+            port:
+              number: 80
+        path: /loadpage/*
+        pathType: ImplementationSpecific

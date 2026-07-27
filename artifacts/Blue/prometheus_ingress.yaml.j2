@@ -1,0 +1,22 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    kubernetes.io/ingress.class: qcloud
+    ingress.cloud.tencent.com/auto-rewrite: "true"
+  name: prometheus-public-alb-ingress
+  namespace: kubecost
+spec:
+  tls:
+  - secretName: sustainability-nprod-cert-secret
+  rules:
+  - host: prometheus-{{ cluster_color }}.342262165274.dncdnsa.net
+    http:
+      paths:
+      - backend:
+          service:
+            name: kubecost-prometheus-server
+            port:
+              number: 80
+        path: /*
+        pathType: ImplementationSpecific

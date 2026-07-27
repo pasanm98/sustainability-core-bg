@@ -1,0 +1,184 @@
+---
+- name: Apply Kubernetes load balancer manifests
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+    namespace_list: "{{ namespaces.split(',') }}"
+    manifests_content:
+      pub-alb-ingress-sustainability-nprod.yaml: |
+        apiVersion: networking.k8s.io/v1
+        kind: Ingress
+        metadata:
+          annotations:
+            kubernetes.io/ingress.class: qcloud
+            ingress.cloud.tencent.com/auto-rewrite: "true"
+          name: pub-alb-ingress-sustainability-nprod
+          namespace: alb-nprod
+        spec:
+          tls:
+          - secretName: sustainability-nprod-cert-secret
+          rules:
+          - http:
+              paths:
+              - backend:
+                  service:
+                    name: nginx-svc
+                    port:
+                      number: 80
+                path: /loadpage/*
+                pathType: ImplementationSpecific
+
+      pvt-alb-ingress-sustainability-nprod.yaml: |
+        apiVersion: networking.k8s.io/v1
+        kind: Ingress
+        metadata:
+          annotations:
+            kubernetes.io/ingress.class: qcloud
+            ingress.cloud.tencent.com/auto-rewrite: "true"
+            # To specify a private network CLB subnet, uncomment and set the following annotation:
+            # kubernetes.io/ingress.subnetId: <TENCENT_SUBNET_ID>
+          name: pvt-alb-ingress-sustainability-nprod
+          namespace: alb-nprod
+        spec:
+          tls:
+          - secretName: sustainability-nprod-cert-secret
+          rules:
+          - http:
+              paths:
+              - backend:
+                  service:
+                    name: nginx-svc
+                    port:
+                      number: 80
+                path: /loadpage/*
+                pathType: ImplementationSpecific
+
+  tasks:
+    - name: Ensure CLI installation prerequisites are installed
+      ansible.builtin.yum:
+        name:
+          - curl
+          - tar
+          - gzip
+        state: present
+
+    - name: Ensure kubectl is installed
+      ansible.builtin.shell: |
+        if ! command -v kubectl >/dev/null 2>&1; then
+          KUBECTL_VERSION="$(curl -L -s https://dl.k8s.io/release/stable.txt)"
+          curl -L --fail "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" -o /tmp/kubectl
+          install -m 0755 /tmp/kubectl /usr/local/bin/kubectl
+          rm -f /tmp/kubectl
+        fi
+      args:
+        executable: /bin/bash
+
+    - name: Check if openssl11-devel is installed
+      shell: rpm -q openssl11-devel
+      register: openssl11_check
+      failed_when: false
+      changed_when: false
+
+    - name: Ensure python3-pip is installed
+      ansible.builtin.yum:
+        name: python3-pip
+        state: present
+      register: yum_pip
+      until: yum_pip is succeeded
+      retries: 10
+      delay: 5
+
+    - name: Ensure required build tools are installed
+      ansible.builtin.yum:
+        name:
+          - gcc
+          - make
+          - "{{ 'openssl11-devel' if openssl11_check.rc == 0 else 'openssl-devel' }}"
+          - bzip2-devel
+          - libffi-devel
+          - wget
+        state: present
+      register: yum_build_tools
+      until: yum_build_tools is succeeded
+      retries: 10
+      delay: 5
+
+    - name: Install compatible versions of Python packages
+      pip:
+        name:
+          - "urllib3<2.0"
+          - "openshift==0.13.1"
+          - "kubernetes<25.0.0"
+          - "pyyaml"
+          - "requests<2.29.0"
+        executable: pip3
+        extra_args: "--user --force-reinstall"
+      become: false
+
+    - name: Initialize need_git_clone to false
+      set_fact:
+        need_git_clone: false
+
+    - name: Set need_git_clone to true if any manifest is missing from inline content
+      set_fact:
+        need_git_clone: true
+      loop: "{{ manifest_files.split(',') }}"
+      when: item not in manifests_content
+
+
+    - name: Ensure git is installed if cloning is required
+      ansible.builtin.yum:
+        name: git
+        state: present
+      register: yum_git
+      until: yum_git is succeeded
+      retries: 10
+      delay: 5
+      when: need_git_clone
+
+    - name: Initialize repo directory
+      file:
+        path: "{{ dest_dir }}"
+        state: directory
+        mode: '0755'
+      become: yes
+      when: need_git_clone
+
+    - name: Clone the repository
+      git:
+        repo: "{{ repo_url }}"
+        dest: "{{ dest_dir }}"
+        version: "{{ branch }}"
+        force: yes
+      when: need_git_clone
+
+    - name: Create k8s namespaces
+      ansible.builtin.shell: kubectl --kubeconfig /root/.kube/config create namespace {{ item }} --dry-run=client -o yaml | kubectl --kubeconfig /root/.kube/config apply -f -
+      loop: "{{ namespace_list }}"
+
+    - name: Write embedded manifests to temporary files
+      ansible.builtin.copy:
+        content: "{{ manifests_content[item] }}"
+        dest: "/tmp/{{ item }}"
+      loop: "{{ manifest_files.split(',') }}"
+      when: item in manifests_content
+
+    - name: Apply embedded load balancer manifests
+      ansible.builtin.shell: kubectl --kubeconfig /root/.kube/config apply -f "/tmp/{{ item }}"
+      loop: "{{ manifest_files.split(',') }}"
+      when: item in manifests_content
+
+    - name: Apply git-based load balancer manifests
+      ansible.builtin.shell: kubectl --kubeconfig /root/.kube/config apply -f "{{ obj_def_path }}/{{ item }}"
+      loop: "{{ manifest_files.split(',') }}"
+      when: item not in manifests_content
+
+    - name: Clean up temporary manifests
+      ansible.builtin.file:
+        path: "/tmp/{{ item }}"
+        state: absent
+      loop: "{{ manifest_files.split(',') }}"
+      when: item in manifests_content

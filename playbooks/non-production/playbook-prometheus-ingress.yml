@@ -1,0 +1,71 @@
+---
+- name: Deploy Prometheus Ingress
+  hosts: localhost
+  connection: local
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+
+  tasks:
+    - name: Ensure CLI installation prerequisites are installed
+      ansible.builtin.yum:
+        name:
+          - curl
+          - tar
+          - gzip
+        state: present
+
+    - name: Ensure kubectl is installed
+      ansible.builtin.shell: |
+        if ! command -v kubectl >/dev/null 2>&1; then
+          KUBECTL_VERSION="$(curl -L -s https://dl.k8s.io/release/stable.txt)"
+          curl -L --fail "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" -o /tmp/kubectl
+          install -m 0755 /tmp/kubectl /usr/local/bin/kubectl
+          rm -f /tmp/kubectl
+        fi
+      args:
+        executable: /bin/bash
+
+    - name: Ensure python3-pip is installed
+      ansible.builtin.yum:
+        name: python3-pip
+        state: present
+      register: yum_pip
+      until: yum_pip is succeeded
+      retries: 10
+      delay: 5
+
+    - name: install pre-requisites
+      pip:
+        name:
+          - openshift
+          - pyyaml
+          - kubernetes
+          - urllib3==1.26.18
+        executable: pip3
+
+    - name: Create kubecost namespace
+      ansible.builtin.shell: kubectl --kubeconfig /root/.kube/config create namespace kubecost --dry-run=client -o yaml | kubectl --kubeconfig /root/.kube/config apply -f -
+
+    - name: Render Prometheus Ingress manifest
+      ansible.builtin.template:
+        src: "{{ obj_def_path }}/prometheus_ingress.yaml.j2"
+        dest: /tmp/prometheus-ingress.yaml
+
+    - name: Deploy Prometheus Ingress
+      ansible.builtin.shell: kubectl --kubeconfig /root/.kube/config apply -f /tmp/prometheus-ingress.yaml
+
+    - name: Render Kubecost Ingress manifest
+      ansible.builtin.template:
+        src: "{{ obj_def_path }}/kubecost_ingress.yaml.j2"
+        dest: /tmp/kubecost-ingress.yaml
+
+    - name: Deploy Kubecost Ingress
+      ansible.builtin.shell: kubectl --kubeconfig /root/.kube/config apply -f /tmp/kubecost-ingress.yaml
+
+    - name: Clean up temporary manifests
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /tmp/prometheus-ingress.yaml
+        - /tmp/kubecost-ingress.yaml
