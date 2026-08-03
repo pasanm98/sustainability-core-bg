@@ -79,19 +79,19 @@ config:
         Time_Keep On
 
     [PARSER]
-      Name                container_firstline
-      Format              regex
-      Regex               (?<log>(?<="log":")\S(?!\.).*?)(?<!\\)".*(?<stream>(?<="stream":").*?)".*(?<time>\d{4}-\d{1,2}-\d{1,2}T\d{2}:\d{2}:\d{2}\.\w*).*(?=})
-      Time_Key            time
-      Time_Format         %Y-%m-%dT%H:%M:%S.%LZ
+        Name                container_firstline
+        Format              regex
+        Regex               (?<log>(?<="log":")\S(?!\.).*?)(?<!\\)\".*(?<stream>(?<="stream":"...).*?)\".*(?<time>\d{4}-\d{1,2}-\d{1,2}T\d{2}:\d{2}:\d{2}\.\w*).*(?=})
+        Time_Key            time
+        Time_Format         %Y-%m-%dT%H:%M:%S.%LZ
 
     [MULTILINE_PARSER]
-      Name          java_multiline
-      type          regex
-      flush_timeout 1000
+        Name          java_multiline
+        type          regex
+        flush_timeout 1000
 
-      rule      "start_state"   "\[?\d{4}-\d{1,2}-\d{1,2}[T\s]\d{1,2}:\d{1,2}:\d{1,2}.\d{3}[+\s]+"  "cont"
-      rule      "cont"          "(?!(\[?\d{4}-\d{1,2}-\d{1,2}[T\s]\d{1,2}:\d{1,2}:\d{1,2}.\d{3}[+\s]+).*)"                     "cont"
+        rule      "start_state"   "\[?\d{4}-\d{1,2}-\d{1,2}[T\s]\d{1,2}:\d{1,2}:\d{1,2}.\d{3}[+\s]+"  "cont"
+        rule      "cont"          "(?!(\[?\d{4}-\d{1,2}-\d{1,2}[T\s]\d{1,2}:\d{1,2}:\d{1,2}.\d{3}[+\s]+).*)"                     "cont"
 
 resources:
   limits:
