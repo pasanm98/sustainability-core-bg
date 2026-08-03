@@ -1,4 +1,4 @@
-serviceAccount:
+﻿serviceAccount:
   create: true
   name: fluent-bit
 
@@ -9,7 +9,6 @@ config:
         Flush 1
         Log_Level info
         Parsers_File parsers.conf
-        Parsers_File custom_parsers.conf
         HTTP_Server On
         HTTP_Listen 0.0.0.0
         HTTP_Port 2020
@@ -23,14 +22,13 @@ config:
     [INPUT]
         Name                tail
         Tag                 application.*
-        Exclude_Path        /var/log/containers/cloudwatch-agent*, /var/log/containers/fluent-bit*, /var/log/containers/aws-node*, /var/log/containers/kube-proxy*, /var/log/containers/fluentd*
+        Exclude_Path        /var/log/containers/fluent-bit*, /var/log/containers/kube-proxy*
         Path                /var/log/containers/*.log
         multiline.parser    docker, cri
         DB                  /var/fluent-bit/state/flb_container.db
         Mem_Buf_Limit       50MB
         Skip_Long_Lines     On
         Refresh_Interval    10
-        Rotate_Wait         30
         storage.type        filesystem
         Read_from_Head      Off
 
@@ -51,14 +49,6 @@ config:
         Use_Kubelet         Off
         Buffer_Size         0
 
-    [FILTER]
-        Name                  multiline
-        Match                 application.*
-        multiline.key_content log
-        multiline.parser      java_multiline
-        emitter_name          multiline_for_java
-        emitter_mem_buf_limit 50MB
-
   outputs: |
     [OUTPUT]
         Name                s3
@@ -69,29 +59,6 @@ config:
         store_dir           /var/log/fluentbit-cos
         store_dir_limit_size 300M
         upload_timeout      1m
-
-  customParsers: |
-    [PARSER]
-        Name docker
-        Format json
-        Time_Key time
-        Time_Format %Y-%m-%dT%H:%M:%S.%L
-        Time_Keep On
-
-    [PARSER]
-        Name                container_firstline
-        Format              regex
-        Regex               (?<log>(?<="log":")\S(?!\.).*?)(?<!\\)\".*(?<stream>(?<="stream":"...).*?)\".*(?<time>\d{4}-\d{1,2}-\d{1,2}T\d{2}:\d{2}:\d{2}\.\w*).*(?=})
-        Time_Key            time
-        Time_Format         %Y-%m-%dT%H:%M:%S.%LZ
-
-    [MULTILINE_PARSER]
-        Name          java_multiline
-        type          regex
-        flush_timeout 1000
-
-        rule      "start_state"   "\[?\d{4}-\d{1,2}-\d{1,2}[T\s]\d{1,2}:\d{1,2}:\d{1,2}.\d{3}[+\s]+"  "cont"
-        rule      "cont"          "(?!(\[?\d{4}-\d{1,2}-\d{1,2}[T\s]\d{1,2}:\d{1,2}:\d{1,2}.\d{3}[+\s]+).*)"                     "cont"
 
 resources:
   limits:
