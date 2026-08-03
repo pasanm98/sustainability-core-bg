@@ -92,10 +92,6 @@ config:
       rule      "start_state"   "\[?\d{4}-\d{1,2}-\d{1,2}[T\s]\d{1,2}:\d{1,2}:\d{1,2}.\d{3}[+\s]+"  "cont"
       rule      "cont"          "(?!(\[?\d{4}-\d{1,2}-\d{1,2}[T\s]\d{1,2}:\d{1,2}:\d{1,2}.\d{3}[+\s]+).*)"                     "cont"
 
-image:
-  repository: fluent/fluent-bit
-  tag: 3.0
-
 resources:
   limits:
     memory: 1Gi
