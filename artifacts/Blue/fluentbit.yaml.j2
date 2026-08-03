@@ -64,9 +64,9 @@ config:
         Match               application.*
         bucket              {{ cos_bucket_name }}
         region              {{ cos_region | default('ap-singapore') }}
-        {% if cos_endpoint is defined and cos_endpoint %}
+{% if cos_endpoint is defined and cos_endpoint %}
         endpoint            {{ cos_endpoint }}
-        {% endif %}
+{% endif %}
         store_dir           /var/log/fluentbit-cos
         store_dir_limit_size 300M
         upload_timeout      1m
