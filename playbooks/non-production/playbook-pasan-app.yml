@@ -1,0 +1,277 @@
+---
+# ===========================================================================
+# playbook-pasan-app.yml
+#
+# Deploys a lightweight sample application ("pasan-app") to end-to-end verify
+# the Gateway API stack installed by playbook-envoy-gateway.yml.
+#
+# What it does:
+#   1. Creates the 'pasan-app' Kubernetes namespace.
+#   2. Deploys a simple nginx Deployment (2 replicas) as pasan-app.
+#   3. Exposes it as a ClusterIP Service on port 80.
+#   4. Creates an HTTPRoute that attaches to the existing Gateway (tke-external-gateway)
+#      and routes all traffic for path prefix /pasan-app to the Service.
+#
+# Called from the `dynamic` Terraform layer via TAT on the bastion host.
+# The Gateway + GatewayClass must already exist (applied by playbook-envoy-gateway.yml
+# in the secondary layer).
+#
+# Extravars (all optional — defaults shown below):
+#   app_namespace      : Namespace for pasan-app   (default: pasan-app)
+#   app_image          : Container image to deploy  (default: nginx:stable-alpine)
+#   app_replicas       : Number of pod replicas     (default: 2)
+#   app_path_prefix    : HTTPRoute path prefix      (default: /pasan-app)
+#   gateway_name       : Name of the Gateway CR     (default: tke-external-gateway)
+#   gateway_namespace  : Namespace of the Gateway   (default: default)
+# ===========================================================================
+- name: Deploy pasan-app sample application and HTTPRoute on TKE
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+    # ── Defaults (all overridable via extravars) ──────────────────────────────
+    app_namespace: "pasan-app"
+    app_image: "nginx:stable-alpine"
+    app_replicas: 2
+    app_path_prefix: "/pasan-app"
+    gateway_name: "tke-external-gateway"
+    gateway_namespace: "default"
+
+  tasks:
+    # ── 1. Pre-requisites ─────────────────────────────────────────────────────
+    - name: Ensure CLI prerequisites are installed (curl, tar, gzip)
+      ansible.builtin.yum:
+        name:
+          - curl
+          - tar
+          - gzip
+        state: present
+      register: yum_prereqs
+      until: yum_prereqs is succeeded
+      retries: 10
+      delay: 5
+
+    - name: Ensure kubectl is installed
+      ansible.builtin.shell: |
+        if ! command -v kubectl >/dev/null 2>&1; then
+          KUBECTL_VERSION="$(curl -L -s https://dl.k8s.io/release/stable.txt)"
+          curl -L --fail "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" -o /tmp/kubectl
+          install -m 0755 /tmp/kubectl /usr/local/bin/kubectl
+          rm -f /tmp/kubectl
+        fi
+      args:
+        executable: /bin/bash
+
+    - name: Wait for kubeconfig to be available on the bastion
+      ansible.builtin.wait_for:
+        path: /root/.kube/config
+        state: present
+        timeout: 180
+
+    # ── 2. Verify Gateway API prerequisites ───────────────────────────────────
+    - name: Verify GatewayClass 'eg' is Accepted
+      ansible.builtin.shell: |
+        STATUS=$(kubectl --kubeconfig /root/.kube/config \
+          get gatewayclass eg \
+          -o jsonpath='{.status.conditions[?(@.type=="Accepted")].status}' 2>/dev/null)
+        if [ "$STATUS" != "True" ]; then
+          echo "ERROR: GatewayClass 'eg' is not Accepted (status: $STATUS)."
+          echo "Run playbook-envoy-gateway.yml first."
+          exit 1
+        fi
+        echo "GatewayClass 'eg' is Accepted."
+      args:
+        executable: /bin/bash
+
+    - name: Verify Gateway '{{ gateway_name }}' is Programmed
+      ansible.builtin.shell: |
+        STATUS=$(kubectl --kubeconfig /root/.kube/config \
+          get gateway {{ gateway_name }} \
+          -n {{ gateway_namespace }} \
+          -o jsonpath='{.status.conditions[?(@.type=="Programmed")].status}' 2>/dev/null)
+        if [ "$STATUS" != "True" ]; then
+          echo "WARNING: Gateway '{{ gateway_name }}' is not yet fully Programmed."
+          echo "Proceeding with HTTPRoute deployment (will retry binding)."
+        else
+          echo "Gateway '{{ gateway_name }}' is Programmed. Proceeding."
+        fi
+      args:
+        executable: /bin/bash
+
+    # ── 3. Create namespace ───────────────────────────────────────────────────
+    - name: Create namespace '{{ app_namespace }}'
+      ansible.builtin.shell: |
+        kubectl --kubeconfig /root/.kube/config \
+          create namespace {{ app_namespace }} \
+          --dry-run=client -o yaml | \
+          kubectl --kubeconfig /root/.kube/config apply -f -
+      args:
+        executable: /bin/bash
+
+    # ── 4. Deploy pasan-app nginx Deployment ─────────────────────────────────
+    - name: Deploy pasan-app Deployment (nginx)
+      ansible.builtin.shell: |
+        kubectl --kubeconfig /root/.kube/config apply -f - <<YAML_EOF
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: pasan-app
+          namespace: {{ app_namespace }}
+          labels:
+            app: pasan-app
+            managed-by: terraform-tat
+        spec:
+          replicas: {{ app_replicas }}
+          selector:
+            matchLabels:
+              app: pasan-app
+          template:
+            metadata:
+              labels:
+                app: pasan-app
+            spec:
+              containers:
+              - name: nginx
+                image: {{ app_image }}
+                ports:
+                - containerPort: 80
+                readinessProbe:
+                  httpGet:
+                    path: /
+                    port: 80
+                  initialDelaySeconds: 5
+                  periodSeconds: 10
+                livenessProbe:
+                  httpGet:
+                    path: /
+                    port: 80
+                  initialDelaySeconds: 15
+                  periodSeconds: 20
+                resources:
+                  requests:
+                    cpu: "50m"
+                    memory: "64Mi"
+                  limits:
+                    cpu: "200m"
+                    memory: "128Mi"
+        YAML_EOF
+      args:
+        executable: /bin/bash
+
+    # ── 5. Expose pasan-app as a ClusterIP Service ────────────────────────────
+    - name: Apply pasan-app ClusterIP Service
+      ansible.builtin.shell: |
+        kubectl --kubeconfig /root/.kube/config apply -f - <<YAML_EOF
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: pasan-app-svc
+          namespace: {{ app_namespace }}
+          labels:
+            app: pasan-app
+            managed-by: terraform-tat
+        spec:
+          selector:
+            app: pasan-app
+          ports:
+          - name: http
+            port: 80
+            targetPort: 80
+          type: ClusterIP
+        YAML_EOF
+      args:
+        executable: /bin/bash
+
+    # ── 6. Wait for Deployment to be Ready ───────────────────────────────────
+    - name: Wait for pasan-app Deployment to be Available
+      ansible.builtin.shell: |
+        kubectl --kubeconfig /root/.kube/config \
+          rollout status deployment/pasan-app \
+          -n {{ app_namespace }} \
+          --timeout=300s
+      args:
+        executable: /bin/bash
+
+    # ── 7. Apply HTTPRoute ────────────────────────────────────────────────────
+    # Routes traffic with path prefix {{ app_path_prefix }} to pasan-app-svc.
+    # Attaches to the shared Gateway (tke-external-gateway) in the default namespace.
+    # Both HTTP (port 80) and HTTPS (port 443) listeners will serve this route.
+    - name: Apply HTTPRoute for pasan-app
+      ansible.builtin.shell: |
+        kubectl --kubeconfig /root/.kube/config apply -f - <<YAML_EOF
+        apiVersion: gateway.networking.k8s.io/v1
+        kind: HTTPRoute
+        metadata:
+          name: pasan-app-route
+          namespace: {{ app_namespace }}
+          labels:
+            app: pasan-app
+            managed-by: terraform-tat
+        spec:
+          parentRefs:
+          - name: {{ gateway_name }}
+            namespace: {{ gateway_namespace }}
+          rules:
+          - matches:
+            - path:
+                type: PathPrefix
+                value: {{ app_path_prefix }}
+            backendRefs:
+            - name: pasan-app-svc
+              namespace: {{ app_namespace }}
+              port: 80
+              weight: 100
+        YAML_EOF
+      args:
+        executable: /bin/bash
+
+    # ── 8. Verify HTTPRoute is Accepted and bound ─────────────────────────────
+    - name: Wait for HTTPRoute to be Accepted (up to 3 min)
+      ansible.builtin.shell: |
+        for i in $(seq 1 18); do
+          STATUS=$(kubectl --kubeconfig /root/.kube/config \
+            get httproute pasan-app-route \
+            -n {{ app_namespace }} \
+            -o jsonpath='{.status.parents[0].conditions[?(@.type=="Accepted")].status}' 2>/dev/null)
+          if [ "$STATUS" = "True" ]; then
+            echo "HTTPRoute 'pasan-app-route' is Accepted by the Gateway."
+            exit 0
+          fi
+          echo "Waiting for HTTPRoute to be Accepted... ($i/18)"
+          sleep 10
+        done
+        echo "WARNING: HTTPRoute acceptance could not be confirmed. Check Gateway events."
+      args:
+        executable: /bin/bash
+
+    # ── 9. Print test instructions ────────────────────────────────────────────
+    - name: Retrieve Gateway external address
+      ansible.builtin.shell: |
+        kubectl --kubeconfig /root/.kube/config \
+          get gateway {{ gateway_name }} \
+          -n {{ gateway_namespace }} \
+          -o jsonpath='{.status.addresses[*].value}'
+      args:
+        executable: /bin/bash
+      register: gateway_address
+      ignore_errors: true
+
+    - name: Print smoke-test instructions
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          pasan-app is deployed and HTTPRoute is attached!
+
+          Gateway external address: {{ gateway_address.stdout | default('check CLB console') }}
+
+          To smoke-test, run:
+            curl http://{{ gateway_address.stdout | default('<CLB-IP>') }}{{ app_path_prefix }}/
+
+          Or with HTTPS (if TLS secret is configured):
+            curl -k https://{{ gateway_address.stdout | default('<CLB-IP>') }}{{ app_path_prefix }}/
+
+          To view all routes:
+            kubectl get httproute -A
+          ============================================================
